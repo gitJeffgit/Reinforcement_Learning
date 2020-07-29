@@ -1,0 +1,214 @@
+# -*- coding: utf-8 -*-
+"""
+#Created on Thu Jul 26 17:02:32 2020
+#From "Machine Learning with Phil" YouTube channel
+#https://github.com/philtabor/Youtube-Code-Repository/blob/master/ReinforcementLearning/Fundamentals/doubleQLearning.py
+#https://raw.githubusercontent.com/philtabor/Youtube-Code-Repository/master/ReinforcementLearning/Fundamentals/doubleQLearning.py
+#Explained on video fro OpenAI Gym on Double Q Learning https://www.youtube.com/watch?v=Q99bEPStnxk
+
+#Installation of Open AI gym on Windows
+#Use "pip install" (conda install https://anaconda.org/akode/gym is only for OS)
+#https://reinforcement-learning4.fun/2019/05/24/how-to-install-openai-gym/
+#https://uoa-eresearch.github.io/eresearch-cookbook/recipe/2014/11/20/conda/
+#https://towardsdatascience.com/how-to-install-openai-gym-in-a-windows-environment-338969e24d30
+"""
+
+"""
+Notes on Virtual Environment in Anaconda Spyder
+Library 'gym' only in virtual environment 'worldmodels'.  To run, either (1) activate
+environment in Anaconda Navigator and then start Spyder IDE from there, or (2) activate 
+virtual environment at python prompt in cmd window (and deactivate later), or (3) run
+Spyder IDE in virutal env [...\Admin\.conda\envs\worldmodels\pythonw.exe], calling
+cwp.py and spyder-script.py [...\Admin\.conda\envs\worldmodels\Scripts\spyder-script.py],
+"""
+#author: Admin
+"""
+#Requires a separate copy of Spyder in virtualenv 'worldmodels', cannot simmply  
+#reset PYTHONPATH via Spyder‘s Python Path Manager (blue-yellow plus sign in dashboard). 
+"""
+"""
+Cart-Pole Problem in OpenAI Gym
+Simulation environment 'env' created with env = gym.make('CartPole-v0'), per
+https://github.com/openai/gym/blob/master/gym/envs/classic_control/cartpole.py
+Standard conditions for simulation:
+Episode ends when pole is more than 12 degrees from vertical,
+or when the cart moves more than 2.4 units from center (displacement)
+Goal is to keep pole vertical as long as possible, limited to 200 periods.
+Reward is +1 for every period the pole is still aloft
+Simulation is in continuous space, but we solve in discrete space by using np.digitize
+for displacement (position on number line),cart velocity, angle theta, angular velocity
+
+"""
+"""
+Double-Q Learning, a form of Reinforcement Learning
+Choose Action 'a' for State 's' using epsilon greedy strategy
+Model-free (although cartpole states are observations based on a model in cartpole.py)
+Q-Learning takes best (argmax) known action at every state
+Off-Policy action selection offsets Maximization Bias
+Two Dictionaries Q1 and Q2 hold values (agent estimates) for every state-action
+Selection of which is target policy and which is behavioral policy is random 
+"""
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import gym
+
+numGames = 10000            #50000 need more when using 0/1 reward for keeping pole aloft
+boolCartVisible = True      #show cartpole animation periodically
+whenCartVisible = 500       #number of episodes between showing cart animation
+doneTheta = 0.3             #angle in +/- radians where pole judged fallen 24 degrees = 0.41888
+#Set stepsize/bin count for four discretized spaces
+lenPosSpace = 2             #number of discrete bins for cart location.  Low env.evn.tau mean cart moves little
+lenVelSpace = 10            #number of discrete bins for horizontal velocity of cart.
+lenThetaSpace = 20          #number of discrete bins for angle theta of pole.
+lenThetaVelSpace = 20       #number of discrete bins for angular velocity of pole.
+#Use alternate reward functions.  
+#   Default is binary 0/1 reward for keeping pole within bounds
+reward_type = 'discrete'    #for 'discrete', 'continuous' gain 1 minus angle in radians from vertical
+default_reward = 'binary'   #'binary' gain 1 for every period pole not fallen
+
+#Set bounds for scenario.  These are also dimensions for cart animation.
+   #scenario finishes if any state dimension reaches bound
+   #keep bounds sufficiently narrow with 0/1 reward for keeping pole aloft,
+   #since simulation learns only from failures. 
+#cartPosSpace = np.linspace(-2.4, 2.4, lenPosSpace)       #position on number line, if too long cannot learn
+cartPosSpace = np.linspace(-1.2, 1.2, lenPosSpace)        #limits to position on number line
+cartVelSpace = np.linspace(-4, 4, lenVelSpace)            #cart velocity left and right
+#poleThetaSpace = np.linspace(-0.20943951, 0.20943, 10)   #ten bins, 0.20944 rads = 12 degs
+#poleThetaSpace = np.linspace(-1.39626, 1.39626, 100)     #100 bins, 1.39626 rads = 80 degs
+#poleThetaSpace = np.linspace(-1.0472, 1.0472, 20)        #20 bins, 1.0472 rads = 60 degs
+poleThetaSpace = np.linspace(-1*doneTheta, doneTheta, lenThetaSpace)#ten bins 0.41888 rads = 24 degs
+poleThetaVelSpace = np.linspace(-4, 4, lenThetaVelSpace)  #angular velocity of tip of pole
+
+def environment_overrides(env):
+#One can change hard-coded parameters set inside environment created by cartpole.py
+    #tau is step size, initially set to 0.02. tau also sets the clock speed, larger values faster
+    env.env.theta_threshold_radians = doneTheta  #fall of pole more noticeable if greater than .4
+    env.env.tau = 0.02  #0.02 cart moves one unit per second. Period between state updates is tau.
+    return env
+
+def maxAction(Q1, Q2, state):  #compares two policies and returns action with highest blended value
+                               #if inputs Q1=Q2, returns best left-right action for a single policy
+                               #actions 0 & 1 for left and right
+    values = np.array([Q1[state,a] + Q2[state,a] for a in range(2)])  
+    action = np.argmax(values)  #returns action of first policy in case of tie
+    return action
+
+def  alt_reward(reward, s_,observation_):  #updated states denoted by underscore '_'
+    if reward_type == 'discrete':          #bins/steps away from vertical as fraction of bins
+        reward = reward* (1 - abs(s_[2]-lenThetaVelSpace/2)/lenThetaVelSpace)
+    else:                                  #'continuous' angle pole away from vertical
+        reward = reward* (1 - abs(observation_[2]))
+    return reward
+
+
+def getState(observation):  
+#from continuous inputs create discrete outputs  #expects 'observation' is 4-member tuple
+#   integer representations state values in ordered 4-tuple
+#position of cart, velocity of cart, angle of pole in radians, angular velocity of pole
+    cartX, cartXdot, cartTheta, cartThetadot = observation
+    icartX = int(np.digitize(cartX, cartPosSpace))
+    icartXdot = int(np.digitize(cartXdot, cartVelSpace))
+    icartTheta = int(np.digitize(cartTheta, poleThetaSpace))
+    icartThetadot = int(np.digitize(cartThetadot, poleThetaVelSpace))
+    return (icartX, icartXdot, icartTheta, icartThetadot)
+
+def getState0(observation):   #same as getState()  #expects 'observation' is 4-member tuple
+    cartX, cartXdot, cartTheta, cartThetadot = observation
+    cartX = int(np.digitize(cartX, cartPosSpace))
+    cartXdot = int(np.digitize(cartXdot, cartVelSpace))
+    cartTheta = int(np.digitize(cartTheta, poleThetaSpace))
+    cartThetadot = int(np.digitize(cartThetadot, poleThetaVelSpace))
+    return (cartX, cartXdot, cartTheta, cartThetadot)
+
+def plotRunningAverage(totalrewards):
+    N = len(totalrewards)
+    running_avg = np.empty(N)
+    for t in range(N):
+	    running_avg[t] = np.mean(totalrewards[max(0, t-100):(t+1)])
+    plt.plot(running_avg)
+    plt.title("Running Average")
+    plt.show()
+    
+#Visualize epsilon.  
+def plotRunningEPS(RunningEPS):     #Epsilon may not be constant
+    plt.plot(RunningEPS)
+    plt.title("Epsilon across Episodes")
+
+if __name__ == '__main__':
+    env = gym.make('CartPole-v0')
+    env = environment_overrides(env)
+    # Model hyperparameters  
+    ALPHA = 0.1  #Learning rate. 
+    GAMMA = 1.0  #Discount rate. Set to 1.0 for deterministic process -- no uncertain/stochastic state transtions 
+    EPS = 1.0    #epsilon is not constant, decreases linearly to zero as episodes increase
+
+    # Construct state space with a list of 4-tuples
+    #   These tuples are a part of the keys to Q1 and Q2 dictionaries that hold the
+    #   estimated value for each state-action. The other part of the key is the left-
+    #   right action of the cart, represented 0/1, ex: '(2, 5, 10, 10), 1)' 
+    states = []
+    for i in range(lenPosSpace+1):
+        for j in range(lenVelSpace+1):
+            for k in range(lenThetaSpace+1):
+                for l in range(lenThetaVelSpace+1):
+                    states.append((i,j,k,l))
+
+#lenPosSpace = 2        #number of discrete bins for cart location.  Low env.evn.tau mean cart moves little
+#lenVelSpace = 10       #number of discrete bins for horizontal velocity of cart.
+#lenThetaSpace = 20     #number of discrete bins for angle theta of pole.
+#lenThetaVelSpace = 20  #number of discrete bins for angular velocity of pole.
+
+    
+    Q1, Q2 = {}, {}      #set up dictionaries keys for state-actions, number of keys
+    for st in states:    #lenPosSpace * lenVelSpace * lenThetaSpace * lenThetaVelSpace * 2
+        for a in range(2):
+            Q1[st, a] = 0
+            Q2[st, a] = 0
+    
+    totalRewards = np.zeros(numGames)
+    RunningEPS = np.ones(numGames)
+    for i in range(numGames):
+        if i % 5000 == 0:
+            print('starting game ', i)
+        cartVisible = False
+        if i % whenCartVisible == 0:
+            cartVisible = boolCartVisible
+        done = False
+        epRewards = 0
+        observation = env.reset() #begin episode with states uniformly distributed on [0.05,0.05] 
+        while not done:
+            s = getState0(observation)            #digitize the current 4-tuple state
+            rand_e = np.random.random()           #input to expsilon-greedy strategy
+            eass = env.action_space.sample()      #eass is 0 or 1 random left-right action
+            a = maxAction(Q1,Q2,s) if rand_e < (1-EPS) else eass 
+            #reward is 0/1 flag for done/continuing
+            observation_, reward, done, info = env.step(a)
+            if cartVisible:
+                env.render()                      #0.02 seconds between state updates, hard-coded in cartpole.py
+
+            epRewards += reward  #sum of 0/1 rewards for default binary reward 
+                                 #epRewards is also number of periods pole is aloft
+            s_ = getState(observation_)   #s_ is integer 4-tuple of two positions and two velocities
+            if reward_type != default_reward:
+                reward = alt_reward(reward,s_,observation_)                     #reward based on angle theta
+            rand_q = np.random.random()                                         #determines which Q-function to update
+            if rand_q <= 0.5:
+                a_ = maxAction(Q1,Q1,s_)  #take max action from Q1
+                Q1[s,a] = Q1[s,a] + ALPHA*(reward + GAMMA*Q2[s_,a_] - Q1[s,a])  #take action-value from Q2
+            elif rand_q > 0.5:
+                a_ = maxAction(Q2,Q2,s_)  #take max action from Q2
+                Q2[s,a] = Q2[s,a] + ALPHA*(reward + GAMMA*Q1[s_,a_] - Q2[s,a])  #take action-value from Q1
+#            if done and cartVisible:     #monitor progress
+#                print(observation_, i)
+#                print(s_, done, a,a_,i,epRewards)
+            observation = observation_
+        EPS -= 2/(numGames) if EPS > 0 else 0                                   #Epsilon linearly goes to zero halfway
+        totalRewards[i] = epRewards
+        RunningEPS[i] = EPS
+    
+    plotRunningAverage(totalRewards)                                            #totalRewards equals periods aloft during episode
+    #plotRunningEPS(RunningEPS)
+    env.close()
+    
